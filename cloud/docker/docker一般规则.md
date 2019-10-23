@@ -9,5 +9,3 @@
     其中：domain指的是你的仓库的域名，k8s部署文件的namespace，官方的是从dockerhub上拉取的，```缺省为docker.io```。
 
     特别地，k8s.gcr.io=gcr.io/google_containers=gcr.io/google-containers, 所以gcr.io/google_containers/pause:3.0也可以用k8s.gcr.io/pause:3.0代替
-
-* 
