@@ -33,3 +33,11 @@
 ## 分支操作
 
 包括切换分支，与远程仓库的交互等
+
+## 异常解决
+
+* 不能显示中文
+
+    ```bash
+    git config --global core.quotepath false
+    ```

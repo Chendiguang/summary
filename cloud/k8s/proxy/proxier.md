@@ -2,15 +2,33 @@
 
 kube-proxy, 首先了解一下大致的目录架构。每一个模块都分别在cmd和pkg目录下面实现分离后的代码。cmd中的每个模块是基于[cobra](https://github.com/spf13/cobra)实现的命令行功能，pkg是实现模块的核心代码。
 
-## ```Cmd```
+[目录索引]
+
+* [1.Cmd](#cmd)
+
+  * [1.1 主入口函数](#cmd-main)
+
+    * [1.1.1 代码](#cmd-code)
+
+    * [1.1.2 其他](#cmd-other)
+
+  * [1.2 app](#app)
+
+    * [1.2.1 server.go](#app-server)
+
+    * [1.2.2 server_other.go](#app-other)
+
+    * [1.2.3 conntrack.go](#app-conntrack)
+
+## <span id=cmd>```1. Cmd```</span>
 
 这里查看的是cmd的代码架构。
 
-### 主入口函数
+### <span id=cmd-main>1.1 主入口函数</span>
 
 代码位于$gopath/k8s.io/kubernetes/cmd/kube-proxy/proxy.go, 主要需要了解的就是```cobra和promethus```。
 
-* 代码
+* <span id=cmd-code>1.1.1 代码</span>
 
     ```go
     func main() {
@@ -34,7 +52,7 @@ kube-proxy, 首先了解一下大致的目录架构。每一个模块都分别�
     }
     ```
 
-* 此外
+* <span id=cmd-other>1.1.2 此外</span>
 
     关注一下这两句代码，注册了promethues的监控功能
 
@@ -48,11 +66,11 @@ kube-proxy, 首先了解一下大致的目录架构。每一个模块都分别�
 
     进入到cmd/kube-proxy目录，可以直接执行go build -v来编译获得相应的二进制执行文件，当然也可以添加额外的命令参数
 
-### app
+### <span id=app>1.2 app</span>
 
 main函数文件引入了```"k8s.io/kubernetes/cmd/kube-proxy/app"```这个包，这就是kube-proxy 实现cmd的全部代码。们只需要关注其中这几个文件：```conntrack.go, server_other.go, server.go```
 
-* server.go
+* <span id=app-server>1.2.1 server.go</span>
 
     根据main() 函数调用的app.NewProxyCommand()我们首先进入server.go查看。下面不是具体代码，而是提取出来的主干代码
 
@@ -292,11 +310,33 @@ main函数文件引入了```"k8s.io/kubernetes/cmd/kube-proxy/app"```这个包�
         func (s *ProxyServer) Run() error {}
         ```
 
-* server_other.go
+* <span id=app-other>1.2.2 server_other.go</span>
 
     linux平台下ProxyServer的部分在这个文件里面实现。
 
-* conntrack.go
+    设置根据环境和配置获取代理模式ProxyMode
+
+    ```go
+        func getProxyMode(proxyMode string, iptver iptables.Versioner, khandle ipvs.KernelHandler, ipsetver ipvs.IPSetVersioner, kcompat iptables.KernelCompatTester) string {
+        switch proxyMode {
+        case proxyModeUserspace:
+            return proxyModeUserspace
+        case proxyModeIPTables:
+            return tryIPTablesProxy(iptver, kcompat)
+        case proxyModeIPVS:
+            return tryIPVSProxy(iptver, khandle, ipsetver, kcompat)
+        }
+        klog.Warningf("Flag proxy-mode=%q unknown, assuming iptables proxy", proxyMode)
+        return tryIPTablesProxy(iptver, kcompat)
+    }
+    ```
+
+    再结合tryIPTablesProxy()和tryIPVSProxy() 的代码可知：优先根据配置文件的设置进入不同的ProxyMode选取函数，
+    Userspace是直接返回，其他两种的根据os是否支持来确定是否继续按照一下优先级往下走: ```IPVS-->IPTables-->Userspace```
+
+    在iptables模式下，kube-proxy使用了iptables的filter表和nat表，并且对iptables的链进行了扩充，自定义了KUBE-SERVICES、KUBE-NODEPORTS、KUBE-POSTROUTING和KUBE-MARK-MASQ四个链，另外还新增了以“KUBE-SVC-”和“KUBE-SEP-”开头的数个链
+
+* <span id=app-conntrack>1.2.3 conntrack.go</span>
 
     整个文件实现的功能是修改linux下面的链路跟踪的参数。查看这些参数可以参考下面的命令
 
@@ -308,6 +348,8 @@ main函数文件引入了```"k8s.io/kubernetes/cmd/kube-proxy/app"```这个包�
 
     # 更具体的用法
     sysctl net.netfilter.nf_conntrack_max
+    # 事实上是在文件里保存的
+     cat /proc/sys/net/netfilter/nf_conntrack_max
 
     dmesg | grep conntrack
     ```
@@ -347,4 +389,16 @@ main函数文件引入了```"k8s.io/kubernetes/cmd/kube-proxy/app"```这个包�
     }
     ```
 
-## Pkg
+## 总结
+
+k8s通过在目标node的nat表中的PREROUTING(路由前)和POSTROUTING(路由后)链中创建一系列自定义链 （这些自定义链主要是“KUBE-SERVICES”链、“KUBE-POSTROUTING”链、每个服务所对应的“KUBE-SVC-XXXXXXXXXXXXXXXX”链和“KUBE-SEP-XXXXXXXXXXXXXXXX”链），然后通过这些自定义链对流经到该node的数据包做DNAT和SNAT操作以实现路由、负载均衡和地址转换。
+
+* ```链名的生成方式```
+
+    先使用SHA256算法对"服务名+协议名+端口"生成哈希值，然后通过base32对该哈希值编码，最后取编码值的前16位
+
+* ```iptables 管理周期```
+
+    kubernetes调用iptables-save命令解析当前node中iptables的filter表和nat表中已经存在的chain，kubernetes会将这些chain存在两个map中（existingFilterChains和existingNATChains），然后再创建四个protobuf中的buffer（分别是filterChains、filterRules、natChains和natRules），后续kubernetes会往这四个buffer中写入大量iptables规则，最后再调用iptables-restore写回到当前node的iptables中。
+
+    总的来说是: iptables-save 和 iptables-restore
